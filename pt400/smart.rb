@@ -25,54 +25,74 @@ class Hacker
     @hacker_id = hacker_id
     @all_matches = all_matches
   end
+
+  # array of matches this hacker has won
   def won_matches
     @all_matches.select do |m|
       m[:winner] == self
     end
   end
+
+  # array of matches this hacker has lost
   def lost_matches
     @all_matches.select do |m|
       m[:loser] == self
     end
   end
+
+  # true if this hacker has had a match with +hacker+
   def has_met?(hacker)
     defeated.include?(hacker) || defeated_by.include?(hacker)
   end
+
   # array of hackers beaten by this hacker
   def defeated
     @defeated ||= won_matches.collect do |m|
       m[:loser]
     end.uniq
   end
+
+  # array of hackers this hacker has lost to
   def defeated_by
     @defeated_by ||= lost_matches.collect do |m|
       m[:winner]
     end.uniq
   end
-  # wins to losses
+
+  # wins-to-losses ratio
   def score
     raise "big error" if defeated - defeated_by != defeated # ridiculous sanity check
     wins.to_f / losses
   end
+
+  # number of hackers this hacker has beaten
   def wins
     defeated.length
   end
+
+  # number of hackers this hacker has lost to
   def losses
     defeated_by.length
   end
+
   def name
     NAMES[@hacker_id]
   end
+
+  # all the hackers this hacker has beaten, and all the hackers that hacker has
+  # beaten, and so on
   def superiors(skip = [])
     @superiors ||= (defeated_by - skip).collect do |h|
       skip << h
       [h, h.superiors(skip)]
     end.flatten.uniq
   end
+
   # true if there's no data saying this hacker couldn't beat +hacker+
   def could_defeat?(hacker)
     !superiors.include?(hacker)
   end
+
   # true if this hacker can definitely beat +hacker+
   #
   # (if any hacker that this hacker has beaten has beaten any hacker that has
@@ -80,12 +100,19 @@ class Hacker
   def will_defeat?(hacker)
     hacker.superiors.include?(self)
   end
+
   # when there's no way to be sure, use statistics
   def will_probably_defeat?(hacker)
     score > hacker.score
   end
+
   def inspect
     '<Hacker:%s hacker_id="%s" name=%s>' % [object_id, @hacker_id, name.inspect]
+  end
+
+  # when SmartGame learns a new match, these cached values must be recalculated
+  def clear_cache!
+    @superiors = @defeated = @defeated_by = nil
   end
 end
 
@@ -97,6 +124,7 @@ class SmartGame < Game
     @good_guesses = @bad_guesses = 0
     @sequence = ''
   end
+
   # read gamelog and build hackers
   def educate
     hackers = {}
@@ -108,6 +136,7 @@ class SmartGame < Game
       winner_id, loser_id = line.split(' beat ')
       hackers[winner_id] = winner = hackers[winner_id] || Hacker.new(winner_id, @hacker_matches)
       hackers[loser_id] = loser = hackers[loser_id] || Hacker.new(loser_id, @hacker_matches)
+
       @hacker_matches << {:winner => winner, :loser => loser}
     end
     @hackers = []
@@ -117,13 +146,111 @@ class SmartGame < Game
     debug 'loaded %d hackers' % @hackers.length
   end
 
+  # given two hackers, predict which will win
+  def predict_winner(hacker1, hacker2)
+    if hacker1.will_defeat?(hacker2)
+      debug ' hacker1 will defeat hacker2'
+      hacker1
+    elsif hacker2.will_defeat?(hacker1)
+      debug ' hacker2 will defeat hacker1'
+      hacker2
+    elsif hacker1.will_probably_defeat?(hacker2)
+      debug ' hacker1 will probably defeat hacker2'
+      hacker1
+    else # hacker2.will_probably_defeat?(hacker2) is true in this case
+      debug ' hacker2 will probably defeat hacker2'
+      hacker2
+    end
+  end
 
-  # this stuff is for testing
+  def get_new_hackers
+    super
+    # if we haven't seen either hacker before, make new objects for them
+    [@hacker_id1, @hacker_id2].each do |hacker_id|
+      @hackers << Hacker.new(hacker_id, @hacker_matches) unless already_seen?(hacker_id)
+    end
+  end
+
+  # use predict_winner to choose between the hackers the server sent
+  def move
+    hacker1 = hacker_by_id(@hacker_id1)
+    hacker2 = hacker_by_id(@hacker_id2)
+
+    choice = predict_winner(hacker1, hacker2)
+
+    if choice == hacker1
+      @sequence += "L"
+      @sock.write "\000"
+      debug 'picking hacker1'
+      @last_move = {:chosen => @hacker_id1, :not_chosen => @hacker_id2}
+    else
+      @sequence += "R"
+      @sock.write "\001"
+      debug 'picking hacker2'
+      @last_move = {:chosen => @hacker_id2, :not_chosen => @hacker_id1}
+    end
+
+    @matches << @last_move
+  end
+
+  def status
+    puts '@sequence = ' + @sequence.inspect + ' (%d)' % @sequence.length
+    puts 'i know about %d hacker matches' % @hacker_matches.length
+    show_guess_stats
+  end
+
+  def show_guess_stats
+    debug 'guessing accuracy == %6.2f%%' % (100.0 * accuracy)
+  end
+  def accuracy
+    (@good_guesses + @bad_guesses) > 0 ? @good_guesses.to_f / (@good_guesses + @bad_guesses) : 0
+  end
+
+  def log(match)
+    super
+    @hacker_matches << {:winner => hacker_by_id(match[:winner]), :loser => hacker_by_id(match[:loser])}
+  end
+
+  # called when we get a guess right
+  def good_guess
+    super
+    puts
+    @good_guesses += 1
+    clear_hacker_caches
+  end
+
+  def sequence
+    @sequence
+  end
+
+  # called when we get a guess wrong
+  def bad_guess
+    super
+    puts
+    @bad_guesses += 1
+    @sequence = '' # @sequence[-1,1]
+    clear_hacker_caches
+  end
+
+  # when we learn a new match, the hackers' cached stats need to be forgotten
+  def clear_hacker_caches
+    @hackers.each { |h| h.clear_cache! }
+  end
+
+  ## beyond this point is stuff i used for testing while writing this script
+
+  # have we already created a hacker object for this hacker id?
+  def already_seen?(hacker_id)
+    hacker_ny_name(hacker_id).nil? rescue false
+  end
+
   def hacker_by_name(name)
     @hackers.find { |h| h.name == name }
   end
   def hacker_by_id(hacker_id)
-    @hackers.find { |h| h.hacker_id == hacker_id }
+    h = @hackers.find { |h| h.hacker_id == hacker_id }
+    raise 'id ' + hacker_id + ' not found' unless h
+    h
   end
   def hackers_by_rank
     @hackers.sort { |h1, h2| h2.score <=> h1.score }
@@ -173,68 +300,14 @@ class SmartGame < Game
     end
     true
   end
-  def predict_winner(hacker1, hacker2)
-    if hacker1.will_defeat?(hacker2)
-      debug ' hacker1 will defeat hacker2'
-      hacker1
-    elsif hacker2.will_defeat?(hacker1)
-      debug ' hacker2 will defeat hacker1'
-      hacker2
-    elsif hacker1.will_probably_defeat?(hacker2)
-      debug ' hacker1 will probably defeat hacker2'
-      hacker1
-    else # hacker2.will_probably_defeat?(hacker2) is true in this case
-      debug ' hacker2 will probably defeat hacker2'
-      hacker2
-    end
-  end
-  def move
-    hacker1 = hacker_by_id(@hacker_id1) || Hacker.new(@hacker_id1, @hacker_matches)
-    hacker2 = hacker_by_id(@hacker_id2) || Hacker.new(@hacker_id2, @hacker_matches)
-    choice = predict_winner(hacker1, hacker2)
-    if choice == hacker1
-      @sequence += "L"
-      @sock.write "\000"
-      debug 'picking hacker1'
-      @last_move = {:chosen => @hacker_id1, :not_chosen => @hacker_id2}
-    else
-      @sequence += "R"
-      @sock.write "\001"
-      debug 'picking hacker2'
-      @last_move = {:chosen => @hacker_id2, :not_chosen => @hacker_id1}
-    end
-    @matches << @last_move
-    # TODO: also add to @hacker_matches
-  end
-  def status
-    puts '@sequence = ' + @sequence.inspect
-    show_guess_stats
-  end
-  def show_guess_stats
-    debug 'guessing accuracy === %6.2f' % (100.0 * @good_guesses / (@good_guesses + @bad_guesses))
-  end
-  def good_guess
-    super
-    puts
-    @good_guesses += 1
-  end
-  def bad_guess
-    super
-    puts
-    @bad_guesses += 1
-    @sequence = @sequence[-1,1]
-  end
 end
 
 if $0 == __FILE__
   s = SmartGame.new
   s.educate
-  puts s.hackers[0].superiors
   sane = s.matches_are_sane?
   puts 'testing: s.matches_are_sane? = ' + sane.inspect
   raise "insane" unless sane
-  puts s.hacker_by_id('1bcfa892701c00ce76d4cb717068dfd6011a49e5')
-  s.show_hacker_rankings
   s.connect
   s.play
 end

@@ -33,9 +33,12 @@ class Game
   # checksums image file and returns checksum as hacker id
   def save_image(data)
     hacker_id = checksum(data)
-    File.open(checksum(data) + '.jpg', 'w') do |f|
-      f.write data
-      debug 'wrote %d bytes to %s' % [data.length, f.path]
+    filename = checksum(data) + '.jpg'
+    unless File.exists?(filename)
+      File.open(filename, 'w') do |f|
+        f.write data
+        debug 'wrote %d bytes to %s' % [data.length, f.path]
+      end
     end
     hacker_id
   end
@@ -85,15 +88,24 @@ class Game
             reconnect
             break
           when -3
-            print 'what sequence? >'
-            sequence = gets.chomp
-            @sock.write sequence
+            game_finished
           when -4
-            puts @sock.read(10000).inspect
+            read_int
+            debug 'WINRAR!'
+            debug 'secret message is: ' + @sock.read(10000).inspect
+            return
           end
         end
       end
     end
+  end
+  def game_finished
+    debug 'game finished. server wants to know how we got here.'
+    @sock.write sequence
+  end
+  def sequence
+    print 'what sequence? >'
+    gets.chomp
   end
   def status; end # to be overridden
   def good_guess
